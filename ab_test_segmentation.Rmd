@@ -2,8 +2,8 @@
 runtime: shiny
 output: 
   html_document:
-    css: ~/Library/CloudStorage/OneDrive-TripAdvisor/R/style.css
-title: 'Hotels Post A/B Test Segmentation'
+    css: ~/style.css
+title: 'Post A/B Test Segmentation'
 always_allow_html: true
 header-includes: "<link href='https://fonts.googleapis.com/css?family=Poppins' rel='stylesheet'>"
 ---
@@ -21,11 +21,11 @@ library(shinyjs)
 library(shinyWidgets)
 library(DT)
 
-source('~/Git backup/R/shiny_experiment_segmentation/snowflake_connector.R')
-source('~/Git backup/R/shiny_experiment_segmentation/datasource_sf.R')
-source('~/Git backup/R/shiny_experiment_segmentation/ab_test_stat_functions.R')
-source('~/Git backup/R/shiny_experiment_segmentation/ab_test_functions.R')
-source('~/Git backup/R/shiny_experiment_segmentation/ab_test_plots.R')
+source('~/snowflake_connector.R')
+source('~/datasource_sf.R')
+source('~/ab_test_stat_functions.R')
+source('~/ab_test_functions.R')
+source('~/ab_test_plots.R')
 ```
 
 ```{r ui, message = FALSE, warning = FALSE, echo = FALSE}
