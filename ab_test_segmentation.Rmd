@@ -1,0 +1,319 @@
+---
+runtime: shiny
+output: 
+  html_document:
+    css: ~/Library/CloudStorage/OneDrive-TripAdvisor/R/style.css
+title: 'Hotels Post A/B Test Segmentation'
+always_allow_html: true
+header-includes: "<link href='https://fonts.googleapis.com/css?family=Poppins' rel='stylesheet'>"
+---
+
+```{r setup, message = FALSE, warning = FALSE, echo = FALSE}
+library(dplyr)
+library(tidyr)
+library(highcharter)
+library(tidyverse)   
+library(shiny)
+library(shinycssloaders)
+library(bslib)
+library(kableExtra)
+library(shinyjs)
+library(shinyWidgets)
+library(DT)
+
+source('~/Git backup/R/shiny_experiment_segmentation/snowflake_connector.R')
+source('~/Git backup/R/shiny_experiment_segmentation/datasource_sf.R')
+source('~/Git backup/R/shiny_experiment_segmentation/ab_test_stat_functions.R')
+source('~/Git backup/R/shiny_experiment_segmentation/ab_test_functions.R')
+source('~/Git backup/R/shiny_experiment_segmentation/ab_test_plots.R')
+```
+
+```{r ui, message = FALSE, warning = FALSE, echo = FALSE}
+ui <- fluidPage(
+  
+  useShinyjs(),
+  includeScript(path = "js4checkbox.js"),
+  includeScript(path = "chart.js"),
+  
+  theme = bs_theme ( 
+    version = 5, 
+    bg = '#FFFFFF', 
+    fg = '#000000', 
+    base_font = font_google('Poppins'), 
+    heading_font = font_google('Poppins'), 
+    code_font = font_google('Roboto Mono'), 
+    font_scale = 0.8, 
+    bootswatch = 'default'),
+  
+  fluidRow(
+    column(
+      width = 8,
+      selectizeInput("experiment_key_input",
+                     label = HTML("<b>Experiment key:</b>"),
+                     choices = experiment_list(),
+                     multiple = FALSE,
+                     selected = NULL, 
+                     options = list(placeholder = 'Please select your experiment key',
+                                    onInitialize = I('function() { this.setValue(""); }')),
+                     width = '100%'
+      )
+    ),
+    column(
+      width = 2,
+      style = 'margin-top: 26px;',
+      actionButton("submit_key", "Submit", 
+                   style="color: black; background-color: #34E0A1; border-color: #34E0A1; width:100px")
+      
+    ),
+    column(
+      width = 2,
+      style = 'margin-top: 26px;',
+      actionButton("reset_all", "Reset",
+                   style="color: black; background-color: #9b9b9b; border-color: #9b9b9b; width:100px")
+    )
+  ),
+  
+  br(),
+  
+  uiOutput("selector_ui"),
+  
+  br(),
+  
+  conditionalPanel(condition = "input.submit_metric",
+                   withSpinner(uiOutput("results_ui"),
+                               image ="https://media.giphy.com/media/SwImQhtiNA7io/giphy.gif",
+                               image.width = '388px',
+                               image.height = '240px',
+                               caption = HTML('<span style="color: #595959; font-size: 16px; font-weight: bold;">Calculating...</span>'))),
+
+  br(),
+  
+  uiOutput("plot_ui"), 
+  highchartOutput('plot_segment')
+)
+
+```
+
+```{r server, message = FALSE, warning = FALSE, echo = FALSE}
+
+server <- function(input, output, session) {
+  
+  observeEvent(input$reset_all, {
+    refresh()
+  })
+  
+  results_df <- data.frame()
+  
+  observeEvent(input$submit_key, {
+    
+    experiment_key <- input$experiment_key_input # Get the experiment_key input when the user clicks Submit.
+    print(experiment_key)
+    
+    metadata <- experiment_metadata(experiment_key)
+    metadata_output <- metadata_output(metadata)
+    
+    cumulative_list <- check_cumulative(experiment_key) # Get buckets keys & max_ds.
+    buckets_df <- sort(cumulative_list$bucket_key)
+    
+    analysis_start_date <- as.Date(metadata$analysis_start_date)
+    analysis_end_date <- as.Date(metadata$analysis_end_date)
+    max_ds <- as.Date(cumulative_list$max_ds)
+    #max_ds <- if(analysis_end_date < as.Date(cumulative_list$max_ds)) {analysis_end_date} else {as.Date(cumulative_list$max_ds)} # If analysis_dates are set, use them.
+    
+    experiment_metrics_df <- get_metric_repo(experiment_key) # Generate metric list for this experiment.
+    metric_mapping <- unique(experiment_metrics_df[, c('metric_id', 'metric_name')]) %>%
+      mutate(metric_name = gsub("_", " ", metric_name),  
+             metric_name = tolower(metric_name), 
+             metric_name = tools::toTitleCase(metric_name))
+    
+    #Show the metric & segment selector, show error message otherwise.
+    output$selector_ui <- renderUI({
+      
+      if (length(buckets_df) > 2) { # If test has more than 2 variants, let user choose two of them.
+        sidebarLayout(
+          sidebarPanel(
+            
+            checkboxGroupInput("variants_select",
+                               "Select two variants to compare their performance:", 
+                               choices = buckets_df),
+            
+            pickerInput("metrics_select",
+                        "Select metrics to include in the segmentation analysis:",
+                        choices = metric_mapping$metric_name,
+                        multiple = TRUE,
+                        selected = NULL,
+                        options = pickerOptions(actionsBox = TRUE,
+                                                liveSearch = TRUE)),
+            
+            selectizeInput("segments_select",
+                           "Select a segment to breakdown the results by:",
+                           choices = list('device', 
+                                          'entry_servlet', 
+                                          'locale', 
+                                          'member_logged_in', 
+                                          'traffic_source', 
+                                          'dated_shopper'),
+                           multiple = FALSE, 
+                           selected = NULL, 
+                           options = list(placeholder = 'Segments',
+                                          onInitialize = I('function() { this.setValue(""); }'))),
+            
+            actionButton("submit_metric", "Submit")),
+          
+          mainPanel(renderTable({metadata_output},
+                                hover = TRUE,
+                                width = 'auto',
+                                align = 'll',
+                                colnames = FALSE,
+                                rownames = FALSE))
+          )
+        
+      } else if (length(buckets_df) == 2) {
+        
+        sidebarLayout(
+          
+          sidebarPanel(
+            
+            pickerInput("metrics_select",
+                        "Select metrics to include in the segmentation analysis:",
+                        choices = metric_mapping$metric_name,
+                        multiple = TRUE,
+                        selected = NULL,
+                        options = pickerOptions(actionsBox = TRUE,
+                                                liveSearch = TRUE)),
+            
+            selectizeInput("segments_select",
+                           "Select a segment to breakdown the results by:",
+                           choices = list('device', 
+                                          'entry_servlet', 
+                                          'locale', 
+                                          'member_logged_in', 
+                                          'traffic_source', 
+                                          'dated_shopper'),
+                           multiple = FALSE, 
+                           selected = NULL, 
+                           options = list(placeholder = 'Segments',
+                                          onInitialize = I('function() { this.setValue(""); }'))),
+            
+            actionButton("submit_metric", "Submit",
+                         style="color: black; background-color: #9b9b9b; border-color: #9b9b9b; width:204px")
+            ),
+          
+          mainPanel(renderTable({metadata_output},
+                                hover = TRUE,
+                                width = 'auto',
+                                align = 'll',
+                                colnames = FALSE,
+                                rownames = FALSE))
+        )
+        
+      } else {
+        HTML("<p>Error! No data available in the cumulative table.</p>")
+      }
+    })
+    
+    #Table & plot UI to generate after user submits selector_ui
+    observeEvent(input$submit_metric, { 
+      
+      print("Submitted metric&segment")
+      
+      variants <- if (length(buckets_df) > 2) {
+        input$variants_select
+      } else if (length(buckets_df) == 2) {
+        buckets_df
+      }
+      
+      seg_col <- input$segments_select
+      
+      snowflake <- datasource_sf(experiment_key, analysis_start_date, max_ds, seg_col) #Generate the df from cumulative table.
+      print(head(snowflake, 10))
+      
+      # Unique segments
+      segments <- c(unique(snowflake[[seg_col]]), "Overall")
+      
+      # Filter metric_df by selected metrics and turn it into a list
+      selected_metric_names <- input$metrics_select
+      selected_metric_ids <- as.vector(metric_mapping$metric_id[match(selected_metric_names, metric_mapping$metric_name)]) # Map selected metric names to their corresponding IDs
+      
+      metric_repo <- experiment_metrics_df[experiment_metrics_df$metric_id %in% selected_metric_ids, ]
+      metric_repo <- split(metric_repo, metric_repo$metric_id)
+      metric_repo <- lapply(metric_repo, as.list)
+      
+      print(variants)
+      #Loop through each metric for each segment
+      for (s in segments) {
+        
+        if (s != "Overall") {
+          data <- snowflake[snowflake[[seg_col]] == s, ]
+        } else {
+          data <- snowflake
+        } 
+        # Loop through metrics
+        for (metric_index in seq_along(selected_metric_ids)) {
+          
+          metric_id <- selected_metric_ids[[metric_index]]
+          
+          a <- data[data$bucket_key == variants[1] & data$metric_id == metric_id, ]
+          b <- data[data$bucket_key == variants[2] & data$metric_id == metric_id, ]
+          
+          single_result <- ttest(a, b, metric_id, metric_repo[[as.character(metric_id)]])
+          single_result$metric_priority <- metric_repo[[as.character(metric_id)]]$metric_priority
+          single_result$segment <- s
+          single_result$variant_comparison <- paste0(variants[1], ' vs. ', variants[2])
+          
+          results_df <- rbind.data.frame(results_df, single_result)
+          results_df <- results_df[order(results_df$denominator_a, decreasing = TRUE), ]
+        }
+      }
+      
+      results_df <- na.omit(results_df)
+
+      output$results_ui <- renderUI({
+        
+        output$results_table <- renderDataTable({format_table(results_df)})
+        
+        if (nrow(results_df) > 0) {
+          title <- paste("Cumulative results from ", analysis_start_date, " to ", max_ds)
+          table <- dataTableOutput("results_table")
+        } else {
+          title <- "No results to display."
+          table <- NULL
+        }
+        
+        list(
+          h1(title),
+          table
+        )
+      })
+      
+      output$plot_ui <- renderUI({
+        if (nrow(results_df) > 0) {
+          
+          selectizeInput("segment_select_plot",
+                         paste0("Select ", seg_col, " to plot the results:"),
+                         choices = unique(results_df$segment),
+                         #selected = 'Overall',
+                         multiple = FALSE)
+        } else {
+          HTML("<p No results to display.</p>")
+        }
+      })
+      
+      filtered_results <- eventReactive(input$segment_select_plot, {
+        selected_segment <- input$segment_select_plot
+        results_df %>% filter(segment == selected_segment)
+      })
+      
+      output$plot_segment <- renderHighchart({
+        plot_results(filtered_results(), 
+                     paste0(input$segment_select_plot, '<br>', variants[1], ' vs. ', variants[2]))
+      })
+    })
+    
+  })
+  
+}
+
+shinyApp(ui = ui, server = server, options = list(height = 1800))
+
+```
